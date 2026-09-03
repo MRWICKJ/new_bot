@@ -1,6 +1,5 @@
 import glob
 import os
-import re
 import time
 from pathlib import Path
 import sqlite3
@@ -9,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from db_manager import MASTER_DB_PATH, init_db, save_to_master_sqlite
 import pandas as pd
-from parsor import parse_tofler_html, parse_zauba_html
+from parsor import parse_zauba_html
 import requests
 
 BASE_DIR = Path(__file__).parent
@@ -35,26 +34,8 @@ ZAUBA_COOKIES = {
     "ZCSESSID": os.getenv("ZAUBA_ZCSESSID", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1dWlkIjoiIn0"),
 }
 
-TOFLER_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:156.0) Gecko/20100101"
-        " Firefox/156.0"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://www.tofler.in/",
-    "Connection": "keep-alive",
-}
-
-TOFLER_COOKIES = {
-    "ToflerSession": os.getenv("TOFLER_SESSION", "184216cf8e739cc4f8ae5b1d5ff1aa02"),
-    "G_ENABLED_IDPS": "google",
-}
-
 if os.getenv("ZAUBA_CF_CLEARANCE") is None:
     print("WARNING: using hardcoded ZAUBA_CF_CLEARANCE; set ZAUBA_CF_CLEARANCE env var.", flush=True)
-if os.getenv("TOFLER_SESSION") is None:
-    print("WARNING: using hardcoded ToflerSession; set TOFLER_SESSION env var.", flush=True)
 
 
 def log(msg):
@@ -120,7 +101,7 @@ def extract_pincode(row) -> str:
 
 
 def extract_geo(row, fb_district="Unknown", fb_sub="Unknown", fb_office="Unknown"):
-    """Prefer CSV columns; fall back to path-derived values. (#7)"""
+    """Prefer CSV columns; fall back to path-derived values."""
     district = get_csv_field(row, ["district"], default=fb_district) or fb_district
     sub = get_csv_field(
         row, ["division / sub-division", "division", "sub-division", "subdivision", "sub_district", "subdistrict"],
@@ -129,100 +110,6 @@ def extract_geo(row, fb_district="Unknown", fb_sub="Unknown", fb_office="Unknown
         row, ["post office / area", "post office", "postoffice", "post_office_name", "office"],
         default=fb_office) or fb_office
     return district, sub, office
-
-
-def slugify_company(name: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", str(name or "").strip().lower())
-    return slug.strip("-") or "company"
-
-
-def fetch_tofler_by_cin(cin: str, company_name: str | None = None):
-    """Try Tofler URL candidates. Real pattern is /{slug}/company/{cin};
-    the old /company/{cin} 404s. Returns (html_or_None, url_used, err_or_None)."""
-    candidates = [f"https://www.tofler.in/company/{cin}"]
-    if company_name and not _is_empty_val(company_name):
-        slug = slugify_company(company_name)
-        candidates.append(f"https://www.tofler.in/{slug}/company/{cin}")
-    last_url, last_err, last_status = candidates[-1], None, None
-    for url in candidates:
-        html, status, err = fetch_url(url, TOFLER_HEADERS, TOFLER_COOKIES)
-        last_url, last_status, last_err = url, status, err
-        if html:
-            if url != candidates[0]:
-                log(f"  [Tofler slug URL worked] CIN: {cin}")
-            return html, url, None
-        log(f"  [Tofler {err or 'no data'}] CIN: {cin} | {url}")
-    return None, last_url, last_err or f"HTTP {last_status}"
-
-
-def _is_empty_val(v) -> bool:
-    if v is None:
-        return True
-    if isinstance(v, str) and v.strip() in ("", "Unknown", "None", "-", "null"):
-        return True
-    return False
-
-
-def merge_basic_info(primary: dict, fallback: dict) -> dict:
-    merged = dict(fallback or {})
-    for k, v in (primary or {}).items():
-        if not _is_empty_val(v):
-            merged[k] = v
-    return merged
-
-
-def merge_directors(a: list, b: list) -> list:
-    seen, out = set(), []
-    for d in (a or []) + (b or []):
-        key = (str(d.get("din") or "").strip() or
-               f"name:{str(d.get('name') or '').strip().lower()}")
-        if key in (None, "", "name:"):
-            continue
-        if key not in seen:
-            seen.add(key)
-            out.append(d)
-    return out
-
-
-def merge_charges(a: list, b: list) -> list:
-    seen, out = set(), []
-    for c in (a or []) + (b or []):
-        cid = str(c.get("charge_id") or "").strip()
-        key = cid if cid else (
-            str(c.get("creation_date")), str(c.get("amount")),
-            str(c.get("charge_holder")))
-        if key not in seen:
-            seen.add(key)
-            out.append(c)
-    return out
-
-
-def merge_payloads(zauba_payload, tofler_payload):
-    """Single merged payload: Zauba wins on conflicts, Tofler fills gaps."""
-    if zauba_payload and not tofler_payload:
-        return zauba_payload
-    if tofler_payload and not zauba_payload:
-        return tofler_payload
-    if not zauba_payload and not tofler_payload:
-        return None
-    company_name = (zauba_payload.get("company_name")
-                    if not _is_empty_val(zauba_payload.get("company_name"))
-                    else tofler_payload.get("company_name"))
-    return {
-        "cin": zauba_payload.get("cin") or tofler_payload.get("cin"),
-        "company_name": company_name,
-        "pincode": zauba_payload.get("pincode") or tofler_payload.get("pincode"),
-        "post_office_name": zauba_payload.get("post_office_name") or tofler_payload.get("post_office_name"),
-        "district": zauba_payload.get("district") or tofler_payload.get("district"),
-        "sub_district": zauba_payload.get("sub_district") or tofler_payload.get("sub_district"),
-        "basic_info": merge_basic_info(
-            zauba_payload.get("basic_info"), tofler_payload.get("basic_info")),
-        "directors": merge_directors(
-            zauba_payload.get("directors"), tofler_payload.get("directors")),
-        "charges": merge_charges(
-            zauba_payload.get("charges"), tofler_payload.get("charges")),
-        "source_url": zauba_payload.get("source_url") or tofler_payload.get("source_url"),
-    }
 
 
 def try_claim(cin: str) -> bool:
@@ -306,7 +193,7 @@ def process_company_record(row, district_fb, sub_district_fb, pincode, office_fb
 
     log(f"Processing CIN: {cin} ...")
 
-    # 1. Fetch & Parse Zauba Corp (with retry)
+    # Fetch & Parse Zauba Corp (with retry)
     zauba_payload = None
     zauba_error = None
     if zauba_url:
@@ -339,53 +226,13 @@ def process_company_record(row, district_fb, sub_district_fb, pincode, office_fb
     else:
         zauba_error = "no zauba url in csv"
 
-    # 2. Fetch & Parse Tofler (slug URL needs company name)
-    tofler_payload = None
-    tofler_error = None
-    csv_company_name = get_csv_field(row, ["company name", "companyname"], default=None)
-    tofler_name_hint = (zauba_payload.get("company_name")
-                        if zauba_payload else csv_company_name)
-    tofler_html, tofler_url, tofler_err = fetch_tofler_by_cin(cin, tofler_name_hint)
-    if tofler_html:
-        try:
-            tofler_master, tofler_directors, tofler_charges = parse_tofler_html(
-                tofler_html, cin=cin
-            )
-            tofler_payload = {
-                "cin": cin,
-                "company_name": tofler_master.get("Company Name") or "Unknown",
-                "pincode": pincode,
-                "post_office_name": office_name,
-                "district": district,
-                "sub_district": sub_district,
-                "basic_info": tofler_master,
-                "directors": tofler_directors,
-                "charges": tofler_charges,
-                "source_url": tofler_url,
-            }
-            log(f"  [OK] Parsed Tofler: {cin}")
-        except Exception as e:
-            tofler_error = f"parse: {e}"[:200]
-    else:
-        tofler_error = tofler_err
-
-    # 3. Merge payloads (Zauba primary, Tofler fills gaps) + single save.
-    merged = merge_payloads(zauba_payload, tofler_payload)
-    status_source = (
-        "both"
-        if (zauba_payload and tofler_payload)
-        else ("zaubacorp" if zauba_payload else ("tofler" if tofler_payload else "failed"))
-    )
-    if merged:
+    # Save Zauba payload (single source)
+    if zauba_payload:
         with db_lock:
-            save_to_master_sqlite(merged)
-        save_log(cin, status_source, "SUCCESS")
+            save_to_master_sqlite(zauba_payload)
+        save_log(cin, "zaubacorp", "SUCCESS")
     else:
-        error = "; ".join(
-            x for x in [f"zauba: {zauba_error}" if zauba_error else None,
-                        f"tofler: {tofler_error}" if tofler_error else None] if x
-        ) or "both sources failed"
-        save_log(cin, "failed", "FAILED", error)
+        save_log(cin, "failed", "FAILED", f"zauba: {zauba_error}" or "zauba failed")
 
 
 def _rel_key(csv_file: str) -> str:
@@ -395,11 +242,12 @@ def _rel_key(csv_file: str) -> str:
         return str(Path(csv_file).resolve())
 
 
-def batch_process_all_files(force: bool = False, limit_files=None, limit_rows=None):
+def batch_process_all_files(force: bool = False, limit_files=None, limit_rows=None, include_others: bool = False):
     from db_manager import get_file_progress, set_file_progress
     init_db(MASTER_DB_PATH)
     csv_files = []
-    for sub in ("output", "others"):
+    subdirs = ("output",) if not include_others else ("output", "others")
+    for sub in subdirs:
         pattern = str(BASE_DIR / sub / "**" / "*.csv")
         found = glob.glob(pattern, recursive=True)
         if found:
@@ -421,7 +269,8 @@ def batch_process_all_files(force: bool = False, limit_files=None, limit_rows=No
     file_pending: dict = {}
     file_meta: dict = {}
     all_futures = []
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+    try:
         for index, csv_file in enumerate(csv_files, 1):
             parts = Path(csv_file).parts
             district_fb = parts[-3] if len(parts) >= 3 else "Unknown"
@@ -471,28 +320,42 @@ def batch_process_all_files(force: bool = False, limit_files=None, limit_rows=No
                     file_pending[key] += 1
                     all_futures.append(fut)
 
+            except KeyboardInterrupt:
+                raise
             except Exception as e:
                 log(f"Error reading CSV {csv_file}: {e}")
 
-        for future in as_completed(all_futures):
-            key = fut_to_file.get(future)
-            try:
-                future.result()
-            except Exception as err:
-                log(f"Worker task error: {err}")
-            if key and key in file_pending:
-                file_pending[key] -= 1
-                if file_pending[key] <= 0:
-                    mtime, size, total = file_meta.get(key, (0, 0, 0))
-                    try:
-                        # Re-stat in case file changed mid-run
-                        st = os.stat(str(BASE_DIR / key) if not os.path.isabs(key) else key)
-                        mtime, size = st.st_mtime, st.st_size
-                    except OSError:
-                        pass
-                    set_file_progress(MASTER_DB_PATH, key, mtime, size, total, "done")
-                    log(f"  [File done] {key} ({total} rows)")
-                    del file_pending[key]
+        try:
+            for future in as_completed(all_futures):
+                key = fut_to_file.get(future)
+                try:
+                    future.result()
+                except Exception as err:
+                    log(f"Worker task error: {err}")
+                if key and key in file_pending:
+                    file_pending[key] -= 1
+                    if file_pending[key] <= 0:
+                        mtime, size, total = file_meta.get(key, (0, 0, 0))
+                        try:
+                            # Re-stat in case file changed mid-run
+                            st = os.stat(str(BASE_DIR / key) if not os.path.isabs(key) else key)
+                            mtime, size = st.st_mtime, st.st_size
+                        except OSError:
+                            pass
+                        # Partial test runs (limit_rows) must NOT mark done,
+                        # or a later full run would wrongly skip the file.
+                        status = "done" if not limit_rows else "partial"
+                        set_file_progress(MASTER_DB_PATH, key, mtime, size, total, status)
+                        log(f"  [File {status}] {key} ({total} rows)")
+                        del file_pending[key]
+        except KeyboardInterrupt:
+            log("\nInterrupted! Cancelling pending tasks (done CINs/files are saved, resume with: python scraper.py) ...")
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        executor.shutdown(wait=True)
+    except KeyboardInterrupt:
+        log("Shutdown. Progress saved — just re-run `python scraper.py` to resume.")
+        raise SystemExit(130)
 
     print(
         f"Done. files_total={total_files} files_queued={queued_files} "
@@ -502,9 +365,11 @@ def batch_process_all_files(force: bool = False, limit_files=None, limit_rows=No
 
 if __name__ == "__main__":
     import argparse
-    ap = argparse.ArgumentParser(description="Scrape Zauba/Tofler into master SQLite DB (resumable).")
+    ap = argparse.ArgumentParser(description="Scrape ZaubaCorp into master SQLite DB (resumable).")
     ap.add_argument("--force", action="store_true", help="Ignore resume ledger and reprocess everything")
     ap.add_argument("--limit-files", type=int, default=None, help="Process only first N files (testing)")
     ap.add_argument("--limit-rows", type=int, default=None, help="Process only first N rows per file (testing)")
+    ap.add_argument("--include-others", action="store_true", help="Also process others/ folder (default: output/ only)")
     args = ap.parse_args()
-    batch_process_all_files(force=args.force, limit_files=args.limit_files, limit_rows=args.limit_rows)
+    batch_process_all_files(force=args.force, limit_files=args.limit_files, limit_rows=args.limit_rows,
+                            include_others=args.include_others)
