@@ -1,3 +1,4 @@
 /others
 /output
-/_pycache__
+/__pycache__/
+all_companies_master.db

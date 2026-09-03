@@ -126,13 +126,17 @@ def parse_tofler_html(html, cin=None):
                 master_data["cin"] = match.group(1)
 
         if "Incorporation Date" in text and not master_data["Incorporation Date"]:
-            master_data["Incorporation Date"] = text.split(":")[-1].strip()
+            date_match = re.search(
+                r"(\d{1,2}[-/ ](?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[-/ ]\d{2,4}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{4}-\d{2}-\d{2}|\w+ \d{1,2},? \d{4})",
+                text, re.I)
+            master_data["Incorporation Date"] = (
+                date_match.group(1) if date_match else text.split(":")[-1].strip()[:50])
 
         if "Company Status" in text and not master_data["Company Status"]:
-            master_data["Company Status"] = text.split(":")[-1].strip()
+            master_data["Company Status"] = text.split(":")[-1].strip()[:50]
 
         if "RoC" in text and not master_data["RoC"]:
-            master_data["RoC"] = text.split(":")[-1].strip()
+            master_data["RoC"] = text.split(":")[-1].strip()[:50]
 
         if "Authorized Capital" in text and not master_data["Authorized Capital"]:
             val_match = re.search(r"[\d,]+(?:\.\d+)?", text)
@@ -162,18 +166,27 @@ def parse_tofler_html(html, cin=None):
         rows = directors_sec.find_all(["tr", "li", "div"])
         for row in rows:
             text = row.get_text(" ", strip=True)
-            din_match = re.search(r"\b\d{8}\b", text)
-            if din_match:
-                din = din_match.group(0)
-                name = re.sub(r"DIN:\s*\d{8}", "", text).strip().split("\n")[0]
-                directors.append({
-                    "cin": master_data["cin"],
-                    "din": din,
-                    "name": name,
-                    "designation": "Director",
-                    "appointment_date": None,
-                    "is_active": True
-                })
+            # Require DIN label context (#13): bare 8-digit numbers are
+            # usually pincodes/phone numbers, not DINs.
+            if "din" not in text.lower():
+                continue
+            din_match = re.search(r"DIN\s*[:\-]?\s*(\d{8})", text, re.I)
+            if not din_match:
+                continue
+            din = din_match.group(1)
+            name = re.sub(r"DIN\s*[:\-]?\s*\d{8}", "", text, flags=re.I).strip()
+            name = re.sub(r"\s*(Director|Appointment Date|Appointed).*", "", name, flags=re.I).strip()
+            name = name.split("\n")[0].strip()[:100]
+            if not name or len(name) < 3:
+                continue
+            directors.append({
+                "cin": master_data["cin"],
+                "din": din,
+                "name": name,
+                "designation": "Director",
+                "appointment_date": None,
+                "is_active": True
+            })
 
     # Extract Charges from Tofler
     charges = []
